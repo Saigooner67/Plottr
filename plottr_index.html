@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Plottr — Satellite & Weather Plotter</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root {--accent:#0ea5a4;--bg:#0f172a;--card:#0b1220;--muted:#94a3b8;color-scheme:dark}
+    html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,'Helvetica Neue',Arial}
+    body{background:linear-gradient(180deg,#071026 0%,#071827 100%);color:#e6eef6;overflow-x:hidden}
+    .container{max-width:1100px;margin:auto;padding:16px}
+    header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:center;text-align:center}
+    h1{margin:0;font-size:1.6rem}
+    .small{font-size:0.85rem;color:var(--muted)}
+    .controls{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:12px;position:relative}
+    .suggestions{position:absolute;top:44px;left:50%;transform:translateX(-50%);width:280px;max-height:160px;overflow-y:auto;background:var(--card);border:1px solid rgba(255,255,255,0.1);border-radius:8px;z-index:999;display:none}
+    .suggestion-item{padding:6px 10px;cursor:pointer}
+    .suggestion-item:hover{background:rgba(255,255,255,0.1)}
+    .card{background:rgba(255,255,255,0.04);padding:12px;border-radius:12px;box-shadow:0 6px 18px rgba(2,6,23,0.6)}
+    input,button,select{padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:inherit;font-size:0.9rem}
+    button{cursor:pointer;background:var(--accent);color:#042024;font-weight:600;transition:0.2s}
+    button:hover{filter:brightness(1.1)}
+    .btn-ghost{background:transparent;border:1px solid rgba(255,255,255,0.2);color:inherit}
+    #map{height:360px;border-radius:10px;margin-top:16px}
+    .grid{display:grid;grid-template-columns:1fr 380px;gap:16px;margin-top:16px}
+    .sidebar{display:flex;flex-direction:column;gap:12px}
+    .chart-wrap{height:220px;padding:8px}
+    footer{text-align:center;margin-top:24px;color:var(--muted);font-size:0.85rem}
+    @media(max-width:900px){.grid{grid-template-columns:1fr}.sidebar{order:-1}#map{height:300px}.chart-wrap{height:200px}}
+    @media(max-width:600px){header h1{font-size:1.3rem}.controls{flex-direction:column;align-items:stretch}input,button,select{width:100%}#map{height:250px}}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Plottr <span class="small">— satellite & weather plots</span></h1>
+    </header>
+
+    <div class="controls card">
+      <input id="loc" placeholder="Search a place (e.g. Tokyo)" autocomplete="off" />
+      <div id="suggestions" class="suggestions"></div>
+      <select id="hours">
+        <option value="24">24h</option>
+        <option value="48">48h</option>
+        <option value="72">72h</option>
+      </select>
+      <button id="fetch">Fetch & Plot</button>
+      <button id="predict" class="btn-ghost">Predict</button>
+      <button id="export" class="btn-ghost">Export CSV</button>
+      <div class="small" id="status">Idle</div>
+    </div>
+
+    <div id="map" class="card"></div>
+
+    <div class="grid">
+      <div>
+        <div class="card chart-wrap"><canvas id="tempChart"></canvas></div>
+        <div class="card chart-wrap" style="margin-top:12px"><canvas id="precipChart"></canvas></div>
+      </div>
+      <div class="sidebar">
+        <div class="card"><strong>Details</strong><div id="details" class="small">No data loaded.</div></div>
+        <div class="card"><strong>Prediction</strong><div id="prediction" class="small">Click Predict to forecast next 6 points.</div></div>
+        <div class="card"><strong>About</strong><div class="small">Plottr fetches hourly weather from Open-Meteo and visualizes it using Chart.js and Leaflet. Search places by name with live suggestions!</div></div>
+      </div>
+    </div>
+
+    <footer>Computer Club Project: Plottr </footer>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script>
+    const statusEl = document.getElementById('status');
+    const detailsEl = document.getElementById('details');
+    const predEl = document.getElementById('prediction');
+    const locEl = document.getElementById('loc');
+    const hoursEl = document.getElementById('hours');
+    const suggBox = document.getElementById('suggestions');
+
+    let map = L.map('map').setView([20,0],2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
+    let marker = null;
+
+    let tempChart=null,precipChart=null;
+    function initCharts(){
+      const tctx=document.getElementById('tempChart').getContext('2d');
+      const pctx=document.getElementById('precipChart').getContext('2d');
+      tempChart=new Chart(tctx,{type:'line',data:{labels:[],datasets:[{label:'Temperature (°C)',data:[],tension:0.2,pointRadius:2}]},options:{responsive:true,maintainAspectRatio:false}});
+      precipChart=new Chart(pctx,{type:'bar',data:{labels:[],datasets:[{label:'Precipitation (mm)',data:[],barPercentage:0.9}]},options:{responsive:true,maintainAspectRatio:false}});
+    }
+
+    function linearRegression(xs,ys){const n=xs.length;if(n<2)return null;const sx=xs.reduce((a,b)=>a+b,0),sy=ys.reduce((a,b)=>a+b,0),sxy=xs.reduce((a,b,i)=>a+b*ys[i],0),sxx=xs.reduce((a,b)=>a+b*b,0);const m=(n*sxy-sx*sy)/(n*sxx-sx*sx);const c=(sy-m*sx)/n;return{slope:m,intercept:c};}
+
+    async function fetchData(lat,lon,hours=24,placeName=''){
+      statusEl.textContent='Fetching...';
+      try{
+        const url=`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=temperature_2m,precipitation,windspeed_10m&timezone=auto&forecast_days=4`;
+        const res=await fetch(url);const data=await res.json();
+        if(!data.hourly)return detailsEl.textContent='No data found';
+        const t=data.hourly.time.slice(0,hours),temp=data.hourly.temperature_2m.slice(0,hours),p=data.hourly.precipitation.slice(0,hours);
+        tempChart.data.labels=t.map(x=>x.replace('T',' '));tempChart.data.datasets[0].data=temp;tempChart.update();
+        precipChart.data.labels=t.map(x=>x.replace('T',' '));precipChart.data.datasets[0].data=p;precipChart.update();
+        if(marker)marker.remove();marker=L.marker([lat,lon]).addTo(map).bindPopup(`${placeName||'Location'}<br>${lat},${lon}`).openPopup();map.setView([lat,lon],6);
+        detailsEl.textContent=`Loaded ${t.length}h of data for ${placeName||lat+','+lon}`;
+        window.plottr={lat,lon,t,temp,p};statusEl.textContent='Data loaded';
+      }catch(e){statusEl.textContent='Error';detailsEl.textContent=e.message;}
+    }
+
+    function runPrediction(){if(!window.plottr)return alert('No data');const y=window.plottr.temp.map(Number).filter(v=>!isNaN(v));if(y.length<3)return alert('Not enough data');const x=y.map((_,i)=>i);const m=linearRegression(x,y);const preds=[];for(let i=x.length;i<x.length+6;i++)preds.push(m.intercept+m.slope*i);predEl.innerHTML=`Next: ${preds.map(v=>v.toFixed(2)).join(', ')}`;}
+
+    async function geocode(query){
+      const r=await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=5&language=en&format=json`);
+      const j=await r.json();return j.results||[];
+    }
+
+    function showSuggestions(list){suggBox.innerHTML='';if(!list.length){suggBox.style.display='none';return;}list.forEach(item=>{const div=document.createElement('div');div.className='suggestion-item';div.textContent=`${item.name}, ${item.country}`;div.onclick=()=>{locEl.value=item.name;suggBox.style.display='none';fetchData(item.latitude,item.longitude,parseInt(hoursEl.value)||24,item.name);saveRecent(item.name);};suggBox.appendChild(div);});suggBox.style.display='block';}
+
+    function saveRecent(name){let r=JSON.parse(localStorage.getItem('recent')||'[]');r=r.filter(x=>x!==name);r.unshift(name);if(r.length>5)r.pop();localStorage.setItem('recent',JSON.stringify(r));}
+
+    locEl.addEventListener('input',async()=>{const q=locEl.value.trim();if(!q){suggBox.style.display='none';return;}const rec=JSON.parse(localStorage.getItem('recent')||'[]');if(q.length<2)return showSuggestions(rec.map(x=>({name:x,country:''})));const list=await geocode(q);showSuggestions([...list,...rec.map(x=>({name:x,country:''}))]);});
+
+    document.getElementById('fetch').onclick=async()=>{const q=locEl.value.trim();if(!q)return alert('Enter location');const list=await geocode(q);if(list[0])fetchData(list[0].latitude,list[0].longitude,parseInt(hoursEl.value)||24,list[0].name);};
+    document.getElementById('predict').onclick=()=>runPrediction();
+    document.getElementById('export').onclick=()=>alert('Export soon');
+    initCharts();
+  </script>
+</body>
+</html>
